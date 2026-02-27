@@ -1,0 +1,30 @@
+# Backtest configuration for daily rebalance strategy
+
+[datasource]
+type = "taobao_daily"
+data_dir = "/Users/rachelpeter/codebase/ocelot/data/raw_taobao"
+start = "2020-01-01"
+end = "2020-06-30"
+exclude_halted = true
+exclude_st = true
+# Limit to first N instruments for faster iteration (0 = no limit)
+max_instruments = 50
+
+[venue]
+# Venues are auto-detected from instruments; these settings apply to all
+oms_type = "NETTING"
+account_type = "CASH"
+base_currency = "CNY"
+starting_balance = 10_000_000
+
+[strategy]
+type = "daily_rebalance"
+random_seed = 42
+max_position_pct = 0.02
+order_lot_size = 100
+long_only = true
+
+[engine]
+trader_id = "BACKTESTER-001"
+log_level = "INFO"
+bypass_risk = true

@@ -94,7 +94,7 @@ claude.config.json
 .aider*
 .continue/
 
-AGENTS.md
+# AGENTS.md  -- kept for our project reference
 CLAUDE.md
 CODEX.md
 GEMINI.md
