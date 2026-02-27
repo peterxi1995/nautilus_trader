@@ -22,6 +22,7 @@ from nautilus_trader.model.instruments.equity import Equity
 from nautilus_trader.model.objects import Price, Quantity
 from nautilus_trader.persistence.wranglers import BarDataWrangler
 
+from datasources.adjusted_bar import BarExtra
 from datasources.base import DataSource
 
 # Chinese exchange suffix -> ISO 10383 MIC  (same as TaobaoDailySource)
@@ -181,6 +182,98 @@ class DuckDBDailySource(DataSource):
 
         wrangler = BarDataWrangler(bar_type, instrument)
         return wrangler.process(df)
+
+    def bar_extras(
+        self,
+        instrument: Equity,
+        bars: list[Bar],
+    ) -> dict[tuple[InstrumentId, int], BarExtra]:
+        """Return BarExtra (vwap, adj_factor) for each bar of *instrument*.
+
+        The extras are keyed by ``(InstrumentId, ts_event_ns)`` so they can be
+        merged into a single lookup table across all instruments.
+
+        Parameters
+        ----------
+        instrument : Equity
+            The instrument whose extras to load.
+        bars : list[Bar]
+            The bars previously returned by :meth:`bars` — used only to
+            extract ``ts_event`` keys.
+
+        Returns
+        -------
+        dict[tuple[InstrumentId, int], BarExtra]
+        """
+        if not bars:
+            return {}
+
+        code = str(instrument.raw_symbol)
+        venue_str = str(instrument.venue)
+        suffix = _SUFFIX_MAP.get(venue_str, venue_str)
+        source_symbol = f"{code}.{suffix}"
+
+        date_clauses: list[str] = []
+        params: list[str] = [source_symbol]
+        if self._start:
+            date_clauses.append("date >= ?")
+            params.append(self._start)
+        if self._end:
+            date_clauses.append("date <= ?")
+            params.append(self._end)
+
+        extra_where = (" AND " + " AND ".join(date_clauses)) if date_clauses else ""
+        sql = f"""
+            SELECT
+                date,
+                COALESCE(avg_price * adj_factor, 0) AS vwap,
+                COALESCE(adj_factor, 1.0)            AS adj_factor
+            FROM ohlcv
+            WHERE symbol = ?{extra_where}
+              AND is_halted = 0
+              AND is_st    = 0
+            ORDER BY date
+        """
+        rows = self._con().execute(sql, params).fetchall()
+
+        # Build a date → (vwap, adj_factor) map from SQL results
+        date_extras: dict[str, tuple[float, float]] = {}
+        for date_val, vwap, adj in rows:
+            date_extras[str(date_val)] = (vwap, adj)
+
+        # Match bars by ts_event (same order/dates) to produce the lookup dict
+        iid = instrument.id
+        result: dict[tuple[InstrumentId, int], BarExtra] = {}
+        for bar in bars:
+            ts = bar.ts_event
+            # Convert ts_event (nanoseconds) → date string for matching
+            # ts_event for daily bars is midnight UTC of that day
+            ts_sec = int(ts) // 1_000_000_000
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(ts_sec, tz=timezone.utc)
+            date_str = dt.strftime("%Y-%m-%d")
+
+            extras_tuple = date_extras.get(date_str)
+            if extras_tuple is not None:
+                vwap_val, adj_val = extras_tuple
+                # If avg_price was NULL/0, fall back to (H+L+C)/3
+                if vwap_val == 0:
+                    vwap_val = (
+                        float(bar.high.as_double())
+                        + float(bar.low.as_double())
+                        + float(bar.close.as_double())
+                    ) / 3.0
+                result[(iid, int(ts))] = BarExtra(vwap=vwap_val, adj_factor=adj_val)
+            else:
+                # No matching row — use defaults
+                vwap_val = (
+                    float(bar.high.as_double())
+                    + float(bar.low.as_double())
+                    + float(bar.close.as_double())
+                ) / 3.0
+                result[(iid, int(ts))] = BarExtra(vwap=vwap_val, adj_factor=1.0)
+
+        return result
 
     # -- convenience ----------------------------------------------------------
 

@@ -1,8 +1,12 @@
-# Backtest configuration for daily rebalance strategy
+# Backtest configuration — Actor + Strategy architecture
+#
+# SignalActor  → computes alpha, publishes RebalanceSignal
+# RiskActor    → monitors positions, publishes RiskSignal
+# ExecutionStrategy → subscribes to both, executes orders
 
 [datasource]
-type = "taobao_daily"
-data_dir = "/Users/rachelpeter/codebase/ocelot/data/raw_taobao"
+type = "duckdb_daily"
+db_path = "/Users/rachelpeter/codebase/ocelot/data/china_daily.duckdb"
 start = "2020-01-01"
 end = "2020-06-30"
 exclude_halted = true
@@ -11,18 +15,25 @@ exclude_st = true
 max_instruments = 50
 
 [venue]
-# Venues are auto-detected from instruments; these settings apply to all
 oms_type = "NETTING"
 account_type = "CASH"
 base_currency = "CNY"
 starting_balance = 10_000_000
 
-[strategy]
-type = "daily_rebalance"
+[signal]
 random_seed = 42
+long_only = true
+
+[execution]
 max_position_pct = 0.02
 order_lot_size = 100
-long_only = true
+
+[risk]
+enabled = true
+stop_loss_pct = 0.10
+take_profit_pct = 0.20
+action_on_stop_loss = "CLOSE"
+action_on_take_profit = "CLOSE"
 
 [engine]
 trader_id = "BACKTESTER-001"

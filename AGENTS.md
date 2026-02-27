@@ -245,8 +245,73 @@ bars = catalog.bars(bar_types=[...], start="2024-01-10", end="2024-01-15")
 
 ```
 projects/
-  datasources/       Data source interface + implementations
-  strategies/        Custom strategies
-  configs/           TOML configuration files
-  run_backtest.py    Main backtest entry point
+  datasources/
+    base.py              Abstract DataSource interface
+    duckdb_daily.py      DuckDB-backed source (primary, with bar_extras)
+    taobao_daily.py      CSV-backed source (legacy)
+    adjusted_bar.py      AdjustedBar + BarExtra types
+  strategies/
+    signals.py           RebalanceSignal, RiskSignal data classes
+    signal_actor.py      SignalActor (bar subscriber → alpha → msgbus)
+    execution_strategy.py ExecutionStrategy (signal consumer → orders)
+    risk_actor.py        RiskActor (position monitor → risk signals)
+    daily_rebalance.py   Legacy monolithic strategy (kept for reference)
+  configs/               TOML configuration files
+  run_backtest.py        Main entry point (Actor+Strategy wiring)
+  bench_architecture.py  Architecture benchmark (V1/V2/V3)
 ```
+
+## Actor + Strategy Architecture
+
+Event flow:
+```
+DataEngine → bars → SignalActor.on_bar()
+                   → RiskActor.on_bar()
+
+SignalActor._emit_signal()
+  → msgbus.publish("signal.rebalance", RebalanceSignal)
+    → ExecutionStrategy._on_rebalance_signal() → submit_order()
+
+RiskActor._check_position()
+  → msgbus.publish("signal.risk", RiskSignal)
+    → ExecutionStrategy._on_risk_signal() → close/reduce position
+```
+
+### Signal Publishing (msgbus.publish / msgbus.subscribe)
+
+Actors cannot submit orders — only Strategies can.  Communication uses
+`self.msgbus.publish(topic, payload)` and `self.msgbus.subscribe(topic, handler)`.
+
+```python
+# In Actor (signal producer):
+self.msgbus.publish("signal.rebalance", signal)
+
+# In Strategy (signal consumer):
+def on_start(self):
+    self.msgbus.subscribe("signal.rebalance", self._on_signal)
+```
+
+### AdjustedBar / BarExtra
+
+NT's built-in `Bar` is a compiled Rust struct (OHLCV + timestamps).  We extend
+it at the Python level with `AdjustedBar` and `BarExtra` for vwap + adj_factor:
+
+```python
+from datasources.adjusted_bar import AdjustedBar, BarExtra
+
+# BarExtra is used in lookup tables: {(InstrumentId, ts_event_ns) → BarExtra}
+extra = BarExtra(vwap=80.5, adj_factor=0.95)
+
+# AdjustedBar wraps a Bar with extra fields
+adj_bar = AdjustedBar(bar, vwap=80.5, adj_factor=0.95)
+adj_bar.unadjusted_close  # = close / adj_factor
+adj_bar.unadjusted_volume # = volume * adj_factor
+```
+
+Convention: `adjusted_price = raw_price × adj_factor`, `adjusted_volume = raw_volume / adj_factor`.
+
+### Volume as Decimal
+
+NT's `Quantity` type is fixed-point with configurable precision and supports
+decimal values: `Quantity.from_str("1.5")` works.  The precision is inferred
+from the string representation.
